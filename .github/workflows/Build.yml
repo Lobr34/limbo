@@ -20,7 +20,6 @@ jobs:
 
       - name: Build APK
         run: |
-          cd limbo-android-lib
           chmod +x gradlew
           ./gradlew assembleDebug
 
