@@ -533,6 +533,456 @@ private String getQemuLibrary() {
         return imgPath;
     }
 
+                                 int sdl_scale_hint, Object[] params);
+
+    private native String stop(int restart);
+
+    public native void setSDLRefreshRateDefault(int value);
+
+    public native void setSDLRefreshRateIdle(int value);
+
+    public native int getSDLRefreshRateDefault();
+
+    public native int getSDLRefreshRateIdle();
+
+    public native void nativeIgnoreBreakpointInvalidate(int value);
+
+    public native void nativeMouseEvent(int button, int action, int relative, int x, int y);
+
+    public native void nativeMouseBounds(int xmin, int xmax, int ymin, int ymax);
+
+    public native void nativeFullscreen();
+
+    public native void nativeRefreshScreen(int value);
+
+    public native void nativeEnableAaudio(int value, String aaudioLibName, String aaudioLibPath);
+
+    /**
+     * Prints parameters in qemu format
+     *
+     * @param params Parameters to be printed
+     */
+    public void printParams(String[] params) {
+        Log.d(TAG, "Params:");
+        for (int i = 0; i < params.length; i++) {
+            Log.d(TAG, i + ": " + params[i]);
+        }
+    }
+
+    // Translate to QEMU format
+    private String getSoundCard() {
+        if (Config.enableSDLSound && getMachine().getSoundCard() != null
+                && !getMachine().getSoundCard().toLowerCase().equals("none"))
+            return getMachine().getSoundCard();
+        return null;
+    }
+
+private String getQemuLibrary() {
+        switch (LimboApplication.arch) {
+            case x86:
+                return "libqemu-system-i386.so";
+            case x86_64:
+                return "libqemu-system-x86_64.so";
+            case arm:
+                return "libqemu-system-arm.so";
+            case arm64:
+                return "libqemu-system-aarch64.so";
+            case ppc:
+                return "libqemu-system-ppc.so";
+            case ppc64:
+                return "libqemu-system-ppc64.so";
+            case sparc:
+                return "libqemu-system-sparc.so";
+            case sparc64:
+                return "libqemu-system-sparc64.so";
+            default:
+                throw new IllegalStateException("Unexpected value: " + LimboApplication.arch);
+        }
+    }
+
+    private String getSaveStateName() {
+        String machineSaveDirectory = MachineController.getInstance().getMachineSaveDir();
+        return machineSaveDirectory + "/" + Config.stateFilename;
+    }
+
+    private String[] prepareParams(Context context) throws Exception {
+        ArrayList<String> paramsList = new ArrayList<>();
+        paramsList.add(getQemuLibrary());
+        addUIOptions(context, paramsList);
+        addCpuBoardOptions(paramsList);
+        addDrives(paramsList);
+        addRemovableDrives(paramsList);
+        addBootOptions(paramsList);
+        addGraphicsOptions(paramsList);
+        addAudioOptions(paramsList);
+        addNetworkOptions(paramsList);
+        addGenericOptions(context, paramsList);
+        addStateOptions(paramsList);
+        addAdvancedOptions(paramsList);
+        addAccelerationOptions(paramsList);
+        return paramsList.toArray(new String[0]);
+    }
+
+    /**
+     * Adds the vm state file description to the qemu parameters for resuming the vm
+     *
+     * @param paramsList Existing parameter list to be passed to qemu
+     */
+    private void addStateOptions(ArrayList<String> paramsList) {
+        if (MachineController.getInstance().isPaused() && !getSaveStateName().equals("")) {
+            int fd_tmp = FileUtils.get_fd(getSaveStateName());
+            if (fd_tmp < 0) {
+                Log.e(TAG, "Error while getting fd for: " + getSaveStateName());
+            } else {
+                Log.d(TAG, "Retrieved fd: " + fd_tmp + " for: " + getSaveStateName());
+                paramsList.add("-incoming");
+                paramsList.add("fd:" + fd_tmp);
+            }
+        }
+    }
+
+    private void addUIOptions(Context context, ArrayList<String> paramsList) {
+        if (MachineController.getInstance().isVNCEnabled()) {
+            paramsList.add("-vnc");
+            String vncParam = "";
+            if (LimboSettingsManager.getVNCEnablePassword(context)) {
+                //TODO: Allow connections from External
+                // Use with x509 auth and TLS for encryption
+                vncParam += ":1";
+            } else {
+                // Allow connections only from localhost using localsocket without
+                // a password
+                vncParam += Config.defaultVNCHost + ":" + Config.defaultVNCPort;
+            }
+            if (LimboSettingsManager.getVNCEnablePassword(context))
+                vncParam += ",password";
+
+            paramsList.add(vncParam);
+
+            //Allow monitor console though it's only supported for VNC, SDL for android doesn't support
+            // more than 1 window
+            paramsList.add("-monitor");
+            paramsList.add("vc");
+
+        } else {
+            //XXX: monitor, serial, and parallel display crashes cause SDL doesn't support more than 1 window
+            paramsList.add("-monitor");
+            paramsList.add("none");
+
+            paramsList.add("-serial");
+            paramsList.add("none");
+
+            paramsList.add("-parallel");
+            paramsList.add("none");
+        }
+
+        if (getMachine().getKeyboard() != null) {
+            paramsList.add("-k");
+            paramsList.add(getMachine().getKeyboard());
+        }
+
+        if (getMachine().getMouse() != null && !getMachine().getMouse().equals("ps2")) {
+            paramsList.add("-usb");
+            paramsList.add("-device");
+            paramsList.add(getMachine().getMouse());
+        }
+    }
+
+    private void addAdvancedOptions(ArrayList<String> paramsList) {
+
+        if (getMachine().getExtraParams() != null && !getMachine().getExtraParams().trim().equals("")) {
+            String[] paramsTmp = getMachine().getExtraParams().split(" ");
+            paramsList.addAll(Arrays.asList(paramsTmp));
+        }
+    }
+
+    private void addAudioOptions(ArrayList<String> paramsList) {
+        if (getSoundCard() != null) {
+            paramsList.add("-soundhw");
+            paramsList.add(getSoundCard());
+        }
+    }
+
+    private void addGenericOptions(Context context, ArrayList<String> paramsList) {
+        paramsList.add("-L");
+        paramsList.add(LimboApplication.getBasefileDir());
+        if (LimboSettingsManager.getEnableQmp(context)) {
+            paramsList.add("-qmp");
+            if (getQMPAllowExternal()) {
+                String qmpParams = "tcp:";
+                qmpParams += (":" + Config.QMPPort);
+                qmpParams += ",server,nowait";
+                paramsList.add(qmpParams);
+            } else {
+                //Specify a unix local domain as localhost to limit to local connections only
+                String qmpParams = "unix:";
+                qmpParams += LimboApplication.getLocalQMPSocketPath();
+                qmpParams += ",server,nowait";
+                paramsList.add(qmpParams);
+            }
+        }
+
+        //Enable Tracing log
+        if (Config.enableTracingLog) {
+            paramsList.add("-D");
+            paramsList.add(Config.traceLogFile);
+            paramsList.add("--trace");
+            paramsList.add("events=" + Config.traceEventsFile);
+            paramsList.add("--trace");
+            paramsList.add("file=" + Config.traceDir);
+        }
+
+        if (Config.overrideTbSize) {
+            paramsList.add("-tb-size");
+            paramsList.add(Config.tbSize); //Don't increase it crashes
+        }
+
+        if (LimboApplication.getQemuVersion() == 20901) {
+            paramsList.add("-realtime");
+            paramsList.add("mlock=off");
+        } else {
+            paramsList.add("-overcommit");
+            paramsList.add("mem-lock=off");
+        }
+
+        paramsList.add("-rtc");
+        paramsList.add("base=localtime");
+
+        if (!Config.enableDefaultDevices)
+            paramsList.add("-nodefaults");
+    }
+
+    private void addCpuBoardOptions(ArrayList<String> paramsList) {
+
+        //XXX: SMP is not working correctly for some guest OSes
+        //so we enable multi core only under KVM
+        // anyway regular emulation is not gaining any benefit unless mttcg is enabled but that
+        // doesn't work for x86 guests yet
+        if (getMachine().getCpuNum() > 1) {
+            paramsList.add("-smp");
+            paramsList.add(getMachine().getCpuNum() + "");
+        }
+        if (getMachineType() != null && !getMachineType().equals("Default")) {
+            paramsList.add("-M");
+            paramsList.add(getMachineType());
+        }
+
+        //FIXME: something is wrong with quoting that doesn't let sparc qemu find the cpu def
+        // for now we remove the cpu drop downlist items for sparc
+        String cpu = getMachine().getCpu();
+        if (getMachine().getCpu() != null && getMachine().getCpu().contains(" "))
+            cpu = "'" + getMachine().getCpu() + "'"; // XXX: needed for sparc cpu names
+
+        //XXX: we disable tsc feature for x86 since some guests are kernel panicking
+        // if the cpu has not specified by user we use the internal qemu32/64
+        if (getMachine().getDisableTSC() == 1 && (LimboApplication.arch == Config.Arch.x86 || LimboApplication.arch == Config.Arch.x86_64)) {
+            if (cpu == null || cpu.equals("Default")) {
+                if (LimboApplication.arch == Config.Arch.x86)
+                    cpu = "qemu32";
+                else if (LimboApplication.arch == Config.Arch.x86_64)
+                    cpu = "qemu64";
+            }
+            cpu += ",-tsc";
+        }
+
+        if (getMachine().getDisableAcpi() != 0) {
+            paramsList.add("-no-acpi"); //disable ACPI
+        }
+        if (getMachine().getDisableHPET() != 0) {
+            paramsList.add("-no-hpet"); //        disable HPET
+        }
+
+        if (cpu != null && !cpu.equals("Default")) {
+            paramsList.add("-cpu");
+            paramsList.add(cpu);
+        }
+
+        paramsList.add("-m");
+        paramsList.add(getMachine().getMemory() + "");
+    }
+
+
+    private void addAccelerationOptions(ArrayList<String> paramsList) {
+
+        // XXX: we add the acceleration options after the extra params
+        // this is due to QEMU applying the first instance of this option
+        // so the extra params cannot override it.
+        if (getMachine().getEnableKVM() != 0) {
+            paramsList.add("-enable-kvm");
+        } else {
+            paramsList.add("-accel");
+            String tcgParams = "tcg";
+            if (getMachine().getEnableMTTCG() != 0) {
+                tcgParams += ",thread=multi";
+            } else {
+                tcgParams += ",thread=single";
+            }
+            paramsList.add(tcgParams);
+        }
+    }
+
+    private String getMachineType() {
+        String machineType = getMachine().getMachineType();
+        if ((LimboApplication.arch == Config.Arch.x86 || LimboApplication.arch == Config.Arch.x86_64)
+                && machineType == null) {
+            machineType = "pc";
+        } else if ((LimboApplication.arch == Config.Arch.ppc || LimboApplication.arch == Config.Arch.ppc64)
+                && machineType.equals("Default")) {
+            machineType = null;
+        } else if ((LimboApplication.arch == Config.Arch.sparc || LimboApplication.arch == Config.Arch.sparc64)
+                && machineType.equals("Default")) {
+            machineType = null;
+        }
+        return machineType;
+    }
+
+    private void addNetworkOptions(ArrayList<String> paramsList) throws Exception {
+
+        String network = getNetCfg();
+        if (network != null) {
+            paramsList.add("-net");
+            if (network.equals("user")) {
+                String netParams = network;
+                String hostFwd = getHostFwd();
+                if (hostFwd != null) {
+
+                    //hostfwd=[tcp|udp]:[hostaddr]:hostport-[guestaddr]:guestport{,hostfwd=...}
+                    // example forward ssh from guest port 2222 to guest port 22:
+                    // hostfwd=tcp::2222-:22
+                    if (hostFwd.startsWith("hostfwd")) {
+                        throw new Exception("Invalid format for Host Forward, should be: tcp:hostport1:guestport1,udp:hostport2:questport2,...");
+                    }
+                    String[] hostFwdParams = hostFwd.split(",");
+                    for (int i = 0; i < hostFwdParams.length; i++) {
+                        netParams += ",";
+                        String[] hostfwdparam = hostFwdParams[i].split(":");
+                        netParams += ("hostfwd=" + hostfwdparam[0] + "::" + hostfwdparam[1] + "-:" + hostfwdparam[2]);
+                    }
+                }
+                paramsList.add(netParams);
+            } else if (network.equals("tap")) {
+                paramsList.add("tap,vlan=0,ifname=tap0,script=no");
+            } else if (network.equals("none")) {
+                paramsList.add("none");
+            } else {
+                //Unknown interface
+                paramsList.add("none");
+            }
+        }
+
+        String networkCard = getNicCard();
+        if (networkCard != null) {
+            paramsList.add("-net");
+            String nicParams = "nic";
+            if (network.equals("tap"))
+                nicParams += ",vlan=0";
+            if (!networkCard.equals("Default"))
+                nicParams += (",model=" + networkCard);
+            paramsList.add(nicParams);
+        }
+    }
+
+    private String getHostFwd() {
+        if (getMachine().getNetwork().equals("User")) {
+            if (getMachine().getHostFwd() != null && !getMachine().getHostFwd().equals(""))
+                return getMachine().getHostFwd();
+        }
+        return null;
+    }
+
+    private String getNicCard() {
+        if (getMachine().getNetwork() == null || getMachine().getNetwork().equals("None")) {
+            return null;
+        } else if (getMachine().getNetwork().equals("User")) {
+            return getMachine().getNetworkCard();
+        } else if (getMachine().getNetwork().equals("TAP")) {
+            return getMachine().getNetworkCard();
+        }
+        return null;
+    }
+
+    private String getNetCfg() {
+        if (getMachine().getNetwork() == null || getMachine().getNetwork().equals("None")) {
+            return "none";
+        } else if (getMachine().getNetwork().equals("User")) {
+            return "user";
+        } else if (getMachine().getNetwork().equals("TAP")) {
+            return "tap";
+        }
+        return null;
+    }
+
+    private void addGraphicsOptions(ArrayList<String> paramsList) {
+        if (getMachine().getVga() != null) {
+            if (getMachine().getVga().equals("Default")) {
+                //do nothing
+            } else if (getMachine().getVga().equals("virtio-gpu-pci")) {
+                paramsList.add("-device");
+                paramsList.add(getMachine().getVga());
+            } else if (getMachine().getVga().equals("nographic")) {
+                paramsList.add("-nographic");
+            } else {
+                paramsList.add("-vga");
+                paramsList.add(getMachine().getVga());
+            }
+        }
+    }
+
+    private void addBootOptions(ArrayList<String> paramsList) {
+        if (getBootDevice() != null) {
+            paramsList.add("-boot");
+            paramsList.add(getBootDevice());
+        }
+
+        String kernel = getKernel();
+        if (kernel != null && !kernel.equals("")) {
+            paramsList.add("-kernel");
+            paramsList.add(kernel);
+        }
+
+        String initrd = getInitRd();
+        if (initrd != null && !initrd.equals("")) {
+            paramsList.add("-initrd");
+            paramsList.add(initrd);
+        }
+
+        if (getMachine().getAppend() != null && !getMachine().getAppend().equals("")) {
+            paramsList.add("-append");
+            paramsList.add(getMachine().getAppend());
+        }
+    }
+
+    private String getBootDevice() {
+        if (LimboApplication.arch == Config.Arch.arm || LimboApplication.arch == Config.Arch.arm64) {
+            return null;
+        } else if (getMachine().getBootDevice().equals("Default")) {
+            return null;
+        } else if (getMachine().getBootDevice().equals("CDROM")) {
+            return "d";
+        } else if (getMachine().getBootDevice().equals("Floppy")) {
+            return "a";
+        } else if (getMachine().getBootDevice().equals("Hard Disk")) {
+            return "c";
+        }
+        return null;
+    }
+
+    private String getInitRd() {
+        return FileUtils.encodeDocumentFilePath(getMachine().getInitRd());
+    }
+
+    private String getKernel() {
+        return FileUtils.encodeDocumentFilePath(getMachine().getKernel());
+    }
+
+    public String getDriveFilePath(String driveFilePath) {
+        String imgPath = driveFilePath;
+        if (imgPath == null || imgPath.equals("None"))
+            return null;
+        imgPath = FileUtils.encodeDocumentFilePath(imgPath);
+        return imgPath;
+    }
+
     public void addDrives(ArrayList<String> paramsList) {
         addHardDisk(paramsList, getDriveFilePath(getMachine().getHdaImagePath()),
                 0, getMachine().getHdaInterface());
